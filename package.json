@@ -38,7 +38,7 @@
     "sourcegraph": "^24.7.0",
     "tagged-template-noop": "^2.1.1",
     "uuid": "^8.3.0",
-    "vscode-languageserver-protocol": "3.14.1"
+    "vscode-languageserver-protocol": "3.15.3"
   },
   "devDependencies": {
     "@sourcegraph/eslint-config": "^0.20.8",
