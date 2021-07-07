@@ -1,5 +1,5 @@
 import { BehaviorSubject, from, Observable, Subject } from 'rxjs'
-import { distinctUntilChanged, map } from 'rxjs/operators'
+import { distinctUntilChanged, map, startWith } from 'rxjs/operators'
 import * as sourcegraph from 'sourcegraph'
 import { LanguageSpec } from './language-specs/spec'
 import { Logger, RedactingLogger } from './logging'
@@ -13,7 +13,7 @@ import { createProviderWrapper, ProviderWrapper, ReferencesProvider } from './pr
  * providers with the given extension context. This function returns true
  * if providers are registered and false otherwise.
  */
-export type LSPFactory = (ctx: sourcegraph.ExtensionContext, providerWrapper: ProviderWrapper) => Promise<boolean>
+export type LSPFactory = (context: sourcegraph.ExtensionContext, providerWrapper: ProviderWrapper) => Promise<boolean>
 
 /**
  * A factory function that creates an LSP client. This function returns the
@@ -142,7 +142,7 @@ export function initLSP<S extends { [key: string]: any }>(
     clientFactory: ClientFactory<S>,
     externalReferencesProviderFactory: ExternalReferencesProviderFactory<S>,
     logger: Logger = new RedactingLogger(console)
-): (ctx: sourcegraph.ExtensionContext, providerWrapper: ProviderWrapper) => Promise<boolean> {
+): (context: sourcegraph.ExtensionContext, providerWrapper: ProviderWrapper) => Promise<boolean> {
     return async (context: sourcegraph.ExtensionContext, providerWrapper: ProviderWrapper): Promise<boolean> => {
         const { settings, settingsSubject } = getSettings<S>(context)
 
@@ -204,18 +204,36 @@ function activateWithoutLSP(
     wrapper: ProviderWrapper
 ): void {
     context.subscriptions.add(sourcegraph.languages.registerDefinitionProvider(selector, wrapper.definition()))
-
-    context.subscriptions.add(sourcegraph.languages.registerReferenceProvider(selector, wrapper.references()))
-
     context.subscriptions.add(sourcegraph.languages.registerHoverProvider(selector, wrapper.hover()))
 
-    // Do not try to register this provider on pre-3.18 instances as it
-    // didn't exist.
+    // Do not try to register this provider on pre-3.18 instances as
+    // it didn't exist.
     if (sourcegraph.languages.registerDocumentHighlightProvider) {
         context.subscriptions.add(
             sourcegraph.languages.registerDocumentHighlightProvider(selector, wrapper.documentHighlights())
         )
     }
+
+    // Re-register the references provider whenever the value of the
+    // mixPreciseAndSearchBasedReferences setting changes.
+
+    let unsubscribeReferencesProvider: sourcegraph.Unsubscribable
+    const registerReferencesProvider = (): void => {
+        unsubscribeReferencesProvider?.unsubscribe()
+        unsubscribeReferencesProvider = sourcegraph.languages.registerReferenceProvider(selector, wrapper.references())
+        context.subscriptions.add(unsubscribeReferencesProvider)
+    }
+
+    context.subscriptions.add(
+        from(sourcegraph.configuration)
+            .pipe(
+                startWith(false),
+                map(() => sourcegraph.configuration.get().get('codeIntel.mixPreciseAndSearchBasedReferences') ?? false),
+                distinctUntilChanged(),
+                map(registerReferencesProvider)
+            )
+            .subscribe()
+    )
 }
 
 /**

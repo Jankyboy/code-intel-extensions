@@ -7,13 +7,21 @@
 
 export interface Settings {
     /**
-     * Whether to use pre-computed LSIF data for code intelligence (such as hovers, definitions, and references). See https://docs.sourcegraph.com/user/code_intelligence/lsif.
+     * Whether to use pre-computed LSIF data for code intelligence (such as hovers, definitions, and references). See https://docs.sourcegraph.com/code_intelligence/explanations/precise_code_intelligence.
      */
     'codeIntel.lsif'?: boolean
+    /**
+     * Whether to enable trace logging on the extension.
+     */
+    'codeIntel.traceExtension'?: boolean
     /**
      * Whether to fetch multiple precise definitions and references on hover.
      */
     'codeIntel.disableRangeQueries'?: boolean
+    /**
+     * Whether to supplement precise references with search-based results.
+     */
+    'codeIntel.mixPreciseAndSearchBasedReferences'?: boolean
     /**
      * Whether to include forked repositories in search results.
      */

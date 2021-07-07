@@ -16,7 +16,9 @@ export interface LanguageSpec {
     stylized: string
 
     /**
-     * The part of the filename after the `.` (e.g. `cpp` in `main.cpp`).
+     * The part of the filename after the `.` (e.g. `cpp` in `main.cpp`). This
+     * used to restrict the definition and reference searches to filenames within
+     * the same "ecosystem".
      */
     fileExts: string[]
 
@@ -71,7 +73,7 @@ export interface CommentStyle {
      * Defaults to `'above the definition'`. In Python, documentation is placed
      * `'below the definition'`.
      */
-    docPlacement?: DocPlacement
+    docPlacement?: TextDocumentPlacement
 
     /**
      * Regex that matches lines between a definition and the docstring that
@@ -83,7 +85,7 @@ export interface CommentStyle {
 /**
  * Where a docstring is located relative to a definition.
  */
-export type DocPlacement = 'above the definition' | 'below the definition'
+export type TextDocumentPlacement = 'above the definition' | 'below the definition'
 
 /**
  * Block comment delimiter patterns for a particular language.

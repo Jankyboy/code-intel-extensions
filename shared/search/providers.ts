@@ -3,8 +3,8 @@ import { from, Observable, isObservable } from 'rxjs'
 import { take } from 'rxjs/operators'
 import * as sourcegraph from 'sourcegraph'
 import { FilterDefinitions, LanguageSpec } from '../language-specs/spec'
-import { Providers, SourcegraphProviders } from '../providers'
-import { API, RepoMeta } from '../util/api'
+import { Providers } from '../providers'
+import { API } from '../util/api'
 import { asArray, isDefined } from '../util/helpers'
 import { asyncGeneratorFromPromise, cachePromiseProvider } from '../util/ix'
 import { parseGitURI } from '../util/uri'
@@ -21,6 +21,9 @@ const documentHighlights = (
     position: sourcegraph.Position
 ): Promise<sourcegraph.DocumentHighlight[] | null> => Promise.resolve(null)
 
+/** The number of files whose content can be cached at once. */
+const FILE_CONTENT_CACHE_CAPACITY = 20
+
 /**
  * Creates providers powered by search-based code intelligence.
  *
@@ -36,41 +39,31 @@ export function createProviders(
         identCharPattern,
         filterDefinitions = results => results,
     }: LanguageSpec,
-    wrappedProviders: Partial<SourcegraphProviders>,
+    wrappedProviders: { definition?: sourcegraph.DefinitionProvider },
     api: API = new API()
 ): Providers {
-    /** Small never-evict map from repo names to their meta. */
-    const cachedMetas = new Map<string, Promise<RepoMeta>>()
+    /* A small (randomly evicting) cache from URIs to file contents. */
+    const cachedFileContents = new Map<string, Promise<string | undefined>>()
 
-    /** Retrieves the name and fork/archive status of a repository. */
-    const resolveRepo = (name: string): Promise<RepoMeta> => {
-        const cachedMeta = cachedMetas.get(name)
-        if (cachedMeta !== undefined) {
-            return cachedMeta
+    /** Retrieves the text of the current text document. */
+    const getFileContent = (uri: string): Promise<string | undefined> => {
+        const cachedFileContent = cachedFileContents.get(uri)
+        if (cachedFileContent !== undefined) {
+            return cachedFileContent
         }
 
-        const meta = api.resolveRepo(name)
-        cachedMetas.set(name, meta)
-        return meta
-    }
+        if (cachedFileContents.size > FILE_CONTENT_CACHE_CAPACITY) {
+            // Remove a random entry from map. This saves us from having to
+            // keep track of frequency or recency information and is likely
+            // to be a decent heuristic (with rare back-to-back evictions).
+            const index = Math.floor(Math.random() * cachedFileContents.size)
+            cachedFileContents.delete([...cachedFileContents.keys()][index])
+        }
 
-    /**
-     * Retrieve the text of the current text document. This may be cached on the
-     * text document itself. If it's not, we fetch it from the Raw API.
-     *
-     * @param uri The URI of the text document to fetch.
-     */
-    const getFileContent = ({
-        uri,
-        text,
-    }: {
-        /** The URI of the text document to fetch. */
-        uri: string
-        /** Possibly cached text from a previous query. */
-        text?: string
-    }): Promise<string | undefined> => {
         const { repo, commit, path } = parseGitURI(new URL(uri))
-        return text ? Promise.resolve(text) : api.getFileContent(repo, commit, path)
+        const fileContent = api.getFileContent(repo, commit, path)
+        cachedFileContents.set(uri, fileContent)
+        return fileContent
     }
 
     /**
@@ -85,7 +78,7 @@ export function createProviders(
         textDocument: sourcegraph.TextDocument,
         position: sourcegraph.Position
     ): Promise<{ text: string; searchToken: string } | undefined> => {
-        const text = await getFileContent(textDocument)
+        const text = await getFileContent(textDocument.uri)
         if (!text) {
             return undefined
         }
@@ -94,9 +87,10 @@ export function createProviders(
             text,
             position,
             lineRegexes: commentStyles.map(style => style.lineRegex).filter(isDefined),
+            blockCommentStyles: commentStyles.map(style => style.block).filter(isDefined),
             identCharPattern,
         })
-        if (!tokenResult || tokenResult.isComment) {
+        if (!tokenResult || tokenResult.isString || tokenResult.isComment) {
             return undefined
         }
 
@@ -119,7 +113,7 @@ export function createProviders(
         }
         const { text, searchToken } = contentAndToken
         const { repo, commit, path } = parseGitURI(new URL(textDocument.uri))
-        const { isFork, isArchived } = await resolveRepo(repo)
+        const { isFork, isArchived } = await api.resolveRepo(repo)
 
         // Construct base definition query without scoping terms
         const queryTerms = definitionQuery({ searchToken, doc: textDocument, fileExts: fileExtensions })
@@ -170,7 +164,7 @@ export function createProviders(
         }
         const { searchToken } = contentAndToken
         const { repo, commit } = parseGitURI(new URL(textDocument.uri))
-        const { isFork, isArchived } = await resolveRepo(repo)
+        const { isFork, isArchived } = await api.resolveRepo(repo)
 
         // Construct base references query without scoping terms
         const queryTerms = referencesQuery({ searchToken, doc: textDocument, fileExts: fileExtensions })
@@ -234,7 +228,7 @@ export function createProviders(
             return null
         }
 
-        const text = await getFileContent({ uri: def.uri.href })
+        const text = await getFileContent(def.uri.href)
         if (!text) {
             return null
         }
@@ -420,7 +414,7 @@ function searchIndexed<
     // Unlike unindexed search, we can't supply a commit as that particular
     // commit may not be indexed. We force index and look inside/outside
     // the repo at _whatever_ commit happens to be indexed at the time.
-    queryTermsCopy.push((negateRepoFilter ? '-' : '') + `repo:^${repo}$`)
+    queryTermsCopy.push((negateRepoFilter ? '-' : '') + `repo:${makeRepositoryPattern(repo)}`)
     queryTermsCopy.push('index:only')
 
     // If we're a fork, search in forks _for the same repo_. Otherwise,
@@ -457,10 +451,10 @@ function searchUnindexed<
 
     if (!negateRepoFilter) {
         // Look in this commit only
-        queryTermsCopy.push(`repo:^${repo}$@${commit}`)
+        queryTermsCopy.push(`repo:${makeRepositoryPattern(repo)}@${commit}`)
     } else {
         // Look outside the repo (not outside the commit)
-        queryTermsCopy.push(`-repo:^${repo}$`)
+        queryTermsCopy.push(`-repo:${makeRepositoryPattern(repo)}`)
     }
 
     // If we're a fork, search in forks _for the same repo_. Otherwise,
@@ -560,4 +554,9 @@ function repositoryKindTerms(includeFork: boolean, includeArchived: boolean): st
     }
 
     return additionalTerms
+}
+
+/** Returns a regular expression matching the given repository. */
+function makeRepositoryPattern(repo: string): string {
+    return `^${repo.replace(/ /g, '\\ ')}$`
 }
